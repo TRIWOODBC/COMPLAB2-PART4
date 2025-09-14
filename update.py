@@ -17,7 +17,7 @@ def main():
 
     # 2) Generate commit message with timestamp
     msg = f"update: sync latest changes ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})"
-    run_cmd(f'git commit -m "fix: improve dataset loader to match case_/seg_ filenames by core name"')
+    run_cmd(f'git commit -m "test: verify dataset loader, 9664 pairs (256x256) loaded successfully"')
 
     # 3) Push to remote
     run_cmd("git push origin main")

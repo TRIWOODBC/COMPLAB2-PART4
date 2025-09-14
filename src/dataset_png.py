@@ -89,3 +89,20 @@ class OasisMRIDataset(Dataset):
             image_t, mask_t = self.transform(image_t, mask_t)
 
         return image_t, mask_t
+
+if __name__ == "__main__":
+    from pathlib import Path
+    import torch
+
+    ROOT = Path(__file__).resolve().parents[1]
+    DATA_ROOT = ROOT / "data" / "OASIS"
+
+    img_dir = DATA_ROOT / "keras_png_slices_train"
+    msk_dir = DATA_ROOT / "keras_png_slices_seg_train"
+
+    ds = OasisMRIDataset(str(img_dir), str(msk_dir))
+    print("Dataset length:", len(ds))
+
+    img, msk = ds[0]
+    print("Image shape:", img.shape, "dtype:", img.dtype)
+    print("Mask shape:", msk.shape, "dtype:", msk.dtype, "unique:", torch.unique(msk))
