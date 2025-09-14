@@ -17,7 +17,7 @@ def main():
 
     # 2) Generate commit message with timestamp
     msg = f"update: sync latest changes ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})"
-    run_cmd(f'git commit -m "chore: add .gitkeep files to track empty directories" || echo "No changes to commit"')
+    run_cmd(f'git commit -m "docs: add environment.yml and update setup instructions in readme"')
 
     # 3) Push to remote
     run_cmd("git push origin main")
