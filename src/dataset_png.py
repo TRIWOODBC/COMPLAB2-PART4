@@ -1,5 +1,5 @@
 import os
-from typing import Optional, Callable
+from typing import Optional, Callable, List, Tuple
 from torch.utils.data import Dataset
 from PIL import Image
 import numpy as np
@@ -8,9 +8,10 @@ import torch
 class OasisMRIDataset(Dataset):
     """
     Dataset for OASIS PNG slices (image-mask pairs).
-    It expects two directories with matching file names:
-      - images_dir: PNG slices (grayscale)
-      - masks_dir:  PNG masks (grayscale, 0 background, >0 foreground)
+    Supports file names like:
+      images: case_001_slice_0.nii.png / img_001_slice_0.nii.png / 001_slice_0.nii.png
+      masks : seg_001_slice_0.nii.png  / 001_slice_0.nii.png
+    We align by a normalized "core name" (prefix removed, extension normalized).
     """
 
     def __init__(
@@ -23,40 +24,68 @@ class OasisMRIDataset(Dataset):
         self.masks_dir = masks_dir
         self.transform = transform
 
-        self.image_files = sorted([f for f in os.listdir(images_dir) if f.lower().endswith(".png")])
-        self.mask_files  = sorted([f for f in os.listdir(masks_dir)  if f.lower().endswith(".png")])
+        img_files = sorted([f for f in os.listdir(images_dir) if f.lower().endswith(".png")])
+        msk_files = sorted([f for f in os.listdir(masks_dir)  if f.lower().endswith(".png")])
 
-        assert len(self.image_files) == len(self.mask_files), \
-            f"Mismatch between images ({len(self.image_files)}) and masks ({len(self.mask_files)})"
-        # Optional: ensure name alignment
-        for a, b in zip(self.image_files, self.mask_files):
-            assert a == b, f"File name mismatch: {a} vs {b}"
+        def core_name(fname: str) -> str:
+            """Normalize name for matching:
+            - strip .nii.png or .png
+            - drop leading prefixes like case_/img_/seg_
+            """
+            name = fname
+            low = name.lower()
+            if low.endswith(".nii.png"):
+                name = name[:-8]  # remove ".nii.png"
+            elif low.endswith(".png"):
+                name = name[:-4]  # remove ".png"
+
+            for pref in ("case_", "img_", "seg_"):
+                if name.startswith(pref):
+                    name = name[len(pref):]
+                    break
+            return name
+
+        # Map core_name -> original filename
+        img_map = {core_name(f): f for f in img_files}
+        msk_map = {core_name(f): f for f in msk_files}
+
+        common_keys = sorted(set(img_map.keys()) & set(msk_map.keys()))
+        if not common_keys:
+            raise RuntimeError(
+                "No matching image/mask pairs found.\n"
+                f"images_dir={images_dir}\n"
+                f"masks_dir={masks_dir}\n"
+                "Check filenames and folder structure."
+            )
+
+        # Build aligned pairs
+        self.pairs: List[Tuple[str, str]] = [
+            (os.path.join(images_dir, img_map[k]), os.path.join(masks_dir, msk_map[k]))
+            for k in common_keys
+        ]
+
+        # Optional: sanity print first pair
+        print(f"[OasisMRIDataset] Found {len(self.pairs)} pairs. Example:\n"
+              f"  image: {self.pairs[0][0]}\n  mask : {self.pairs[0][1]}")
 
     def __len__(self):
-        return len(self.image_files)
+        return len(self.pairs)
 
     def __getitem__(self, idx):
-        img_path = os.path.join(self.images_dir, self.image_files[idx])
-        msk_path = os.path.join(self.masks_dir,  self.mask_files[idx])
+        img_path, msk_path = self.pairs[idx]
 
-        # Load as grayscale
         image = Image.open(img_path).convert("L")
         mask  = Image.open(msk_path).convert("L")
 
-        # To numpy
         image = np.asarray(image, dtype=np.float32) / 255.0  # [0,1]
         mask  = np.asarray(mask,  dtype=np.uint8)
-
-        # Binarize mask: anything >0 becomes 1
         if mask.max() > 1:
             mask = (mask > 0).astype(np.uint8)
 
-        # To tensor: image -> [1,H,W], mask -> [H,W]
-        image_t = torch.from_numpy(image).unsqueeze(0)          # float32
-        mask_t  = torch.from_numpy(mask.astype(np.int64))       # int64 class ids (0/1)
+        image_t = torch.from_numpy(image).unsqueeze(0)        # [1,H,W] float32
+        mask_t  = torch.from_numpy(mask.astype(np.int64))     # [H,W]   int64
 
         if self.transform is not None:
-            # If you use transforms (e.g., albumentations), apply here
             image_t, mask_t = self.transform(image_t, mask_t)
 
         return image_t, mask_t
