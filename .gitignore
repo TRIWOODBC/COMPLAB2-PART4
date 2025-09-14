@@ -1,0 +1,25 @@
+# ===============================
+# Datasets (do not upload to GitHub)
+# ===============================
+data/
+data/OASIS/
+data/OASIS/keras_png_slices_*/
+oasis*/
+
+# ===============================
+# Training outputs (models, logs, checkpoints)
+# ===============================
+outputs/
+*.pth
+*.pt
+*.ckpt
+*.log
+*.tmp
+
+# ===============================
+# Python cache / temporary files
+# ===============================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd

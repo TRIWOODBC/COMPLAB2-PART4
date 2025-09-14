@@ -1,0 +1,23 @@
+# ===============================
+# Core deep learning libraries
+# ===============================
+torch>=2.2
+torchvision>=0.17
+
+# ===============================
+# Medical imaging toolkit
+# ===============================
+monai>=1.3          # Medical Open Network for AI (helps with UNet, metrics, etc.)
+nibabel             # For reading/writing neuroimaging formats (e.g., NIfTI)
+
+# ===============================
+# Data science & utilities
+# ===============================
+numpy
+scikit-learn        # For evaluation metrics, PCA/UMAP, etc.
+tqdm                # Progress bars
+
+# ===============================
+# Visualization
+# ===============================
+matplotlib
