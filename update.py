@@ -17,7 +17,7 @@ def main():
 
     # 2) Generate commit message with timestamp
     msg = f"update: sync latest changes ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})"
-    run_cmd(f'git commit -m "Refactor train_unet.py: fix dataset import, update GradScaler usage, add multi-sample visualization"')
+    run_cmd(f'git commit -m "refactor: merge dataset_png into train_vae, simplify training pipeline"')
 
     # 3) Push to remote
     run_cmd("git push origin main")
