@@ -39,16 +39,22 @@ class OASISPNGSlices(Dataset):
         return self.tf(img)  # 1xHxW
 
 # -----------------------------
+# Helpers
+# -----------------------------
+def GN(c, g=8):
+    return nn.GroupNorm(num_groups=min(g, c), num_channels=c)
+
+# -----------------------------
 # VAE Model
 # -----------------------------
 class Encoder(nn.Module):
-    def __init__(self, latent_dim=16, img_size=256, base=32):
+    def __init__(self, latent_dim=32, img_size=256, base=32):
         super().__init__()
         self.net = nn.Sequential(
             nn.Conv2d(1, base, 4, 2, 1), nn.ReLU(True),
-            nn.Conv2d(base, base*2, 4, 2, 1), nn.BatchNorm2d(base*2), nn.ReLU(True),
-            nn.Conv2d(base*2, base*4, 4, 2, 1), nn.BatchNorm2d(base*4), nn.ReLU(True),
-            nn.Conv2d(base*4, base*8, 4, 2, 1), nn.BatchNorm2d(base*8), nn.ReLU(True),
+            nn.Conv2d(base, base*2, 4, 2, 1), GN(base*2), nn.ReLU(True),
+            nn.Conv2d(base*2, base*4, 4, 2, 1), GN(base*4), nn.ReLU(True),
+            nn.Conv2d(base*4, base*8, 4, 2, 1), GN(base*8), nn.ReLU(True),
         )
         feat = img_size // 16
         self.fc_mu = nn.Linear(base*8*feat*feat, latent_dim)
@@ -60,22 +66,22 @@ class Encoder(nn.Module):
         return self.fc_mu(h), self.fc_logvar(h)
 
 class Decoder(nn.Module):
-    def __init__(self, latent_dim=16, img_size=256, base=32):
+    def __init__(self, latent_dim=32, img_size=256, base=32):
         super().__init__()
         feat = img_size // 16
         self.fc = nn.Linear(latent_dim, base*8*feat*feat)
         self.unflatten = nn.Unflatten(1, (base*8, feat, feat))
         self.net = nn.Sequential(
-            nn.ConvTranspose2d(base*8, base*4, 4, 2, 1), nn.BatchNorm2d(base*4), nn.ReLU(True),
-            nn.ConvTranspose2d(base*4, base*2, 4, 2, 1), nn.BatchNorm2d(base*2), nn.ReLU(True),
-            nn.ConvTranspose2d(base*2, base, 4, 2, 1),   nn.BatchNorm2d(base),   nn.ReLU(True),
+            nn.ConvTranspose2d(base*8, base*4, 4, 2, 1), GN(base*4), nn.ReLU(True),
+            nn.ConvTranspose2d(base*4, base*2, 4, 2, 1), GN(base*2), nn.ReLU(True),
+            nn.ConvTranspose2d(base*2, base, 4, 2, 1),   GN(base),   nn.ReLU(True),
             nn.ConvTranspose2d(base, 1, 4, 2, 1), nn.Sigmoid(),
         )
 
     def forward(self, z): return self.net(self.unflatten(self.fc(z)))
 
 class VAE(nn.Module):
-    def __init__(self, latent_dim=16, img_size=256):
+    def __init__(self, latent_dim=32, img_size=256):
         super().__init__()
         self.enc = Encoder(latent_dim, img_size)
         self.dec = Decoder(latent_dim, img_size)
@@ -93,10 +99,15 @@ class VAE(nn.Module):
 # -----------------------------
 # Loss
 # -----------------------------
-def vae_loss(x, x_rec, mu, logvar):
-    recon = F.binary_cross_entropy(x_rec, x, reduction="mean")
+def vae_loss(x, x_rec, mu, logvar, recon_type="mse", beta=1.0):
+    if recon_type == "mse":
+        recon = F.mse_loss(x_rec, x, reduction="mean")
+    else:
+        recon = F.binary_cross_entropy(x_rec, x, reduction="mean")
+    logvar = logvar.clamp(-10, 10)
     kl = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-    return recon + kl, recon.item(), kl.item()
+    loss = recon + beta * kl
+    return loss, recon.item(), kl.item()
 
 # -----------------------------
 # Utils
@@ -117,7 +128,8 @@ def plot_curves(history, path):
 # Train
 # -----------------------------
 def train(data_root="data/OASIS", out_dir="outputs/vae", img_size=256,
-          batch_size=16, epochs=50, lr=2e-4, latent_dim=16, seed=42, save_every=10):
+          batch_size=16, epochs=50, lr=1e-4, latent_dim=32, seed=42,
+          save_every=10, recon="mse", kl_warmup_epochs=15, max_grad_norm=1.0):
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -133,23 +145,27 @@ def train(data_root="data/OASIS", out_dir="outputs/vae", img_size=256,
     history = {"train": [], "val": []}; best_val = float("inf")
 
     for ep in range(1, epochs+1):
+        beta = min(1.0, ep / max(1, kl_warmup_epochs))
         model.train(); tr_loss=[]
         for x in tqdm(dl_tr, desc=f"Epoch {ep}/{epochs}"):
-            x = x.to(device); opt.zero_grad()
+            x = x.to(device); opt.zero_grad(set_to_none=True)
             x_rec, mu, logvar = model(x)
-            loss,_,_ = vae_loss(x, x_rec, mu, logvar)
-            loss.backward(); opt.step(); tr_loss.append(loss.item())
+            loss, _, _ = vae_loss(x, x_rec, mu, logvar, recon_type=recon, beta=beta)
+            loss.backward()
+            if max_grad_norm is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            opt.step()
+            tr_loss.append(loss.item())
         history["train"].append(np.mean(tr_loss))
 
         model.eval(); va_loss=[]
         with torch.no_grad():
             for x in dl_va:
                 x = x.to(device); x_rec, mu, logvar = model(x)
-                l,_,_ = vae_loss(x, x_rec, mu, logvar)
+                l, _, _ = vae_loss(x, x_rec, mu, logvar, recon_type=recon, beta=1.0)
                 va_loss.append(l.item())
         val_mean = np.mean(va_loss); history["val"].append(val_mean)
 
-        # 每 save_every 轮保存一次图片
         if ep % save_every == 0 or ep == 1:
             with torch.no_grad():
                 x = next(iter(dl_va))[:32].to(device)
@@ -174,10 +190,13 @@ if __name__ == "__main__":
     parser.add_argument("--img_size", type=int, default=256)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--latent_dim", type=int, default=16)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--latent_dim", type=int, default=32)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save_every", type=int, default=10)
+    parser.add_argument("--recon", type=str, default="mse", choices=["mse","bce"])
+    parser.add_argument("--kl_warmup_epochs", type=int, default=15)
+    parser.add_argument("--max_grad_norm", type=float, default=1.0)
     args = parser.parse_args()
 
     train(**vars(args))

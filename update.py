@@ -17,7 +17,7 @@ def main():
 
     # 2) Generate commit message with timestamp
     msg = f"update: sync latest changes ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})"
-    run_cmd(f'git commit -m "refactor: update VAE training script to 256x256 input and save images every 10 epochs"')
+    run_cmd(f'git commit -m "refactor: improve VAE stability and clarity (MSE recon, GroupNorm, KL warm-up, grad clipping, 256x256, latent_dim=32)"')
 
     # 3) Push to remote
     run_cmd("git push origin main")
