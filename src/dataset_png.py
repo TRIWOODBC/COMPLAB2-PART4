@@ -43,9 +43,9 @@ class OasisMRIDataset(Dataset):
             name = fname
             low = name.lower()
             if low.endswith(".nii.png"):
-                name = name[:-8]  # remove ".nii.png"
+                name = name[:-8]
             elif low.endswith(".png"):
-                name = name[:-4]  # remove ".png"
+                name = name[:-4]
 
             for pref in ("case_", "img_", "seg_"):
                 if name.startswith(pref):
@@ -67,37 +67,14 @@ class OasisMRIDataset(Dataset):
                 "Check filenames and folder structure."
             )
 
-        # Build aligned image-mask pairs
+        # Build aligned image-mask pairs (fast, no validation)
         self.pairs: List[Tuple[str, str]] = [
             (os.path.join(images_dir, img_map[k]), os.path.join(masks_dir, msk_map[k]))
             for k in common_keys
         ]
 
-        # Validate pairs and skip corrupted files
-        self.bad = []
-        valid_pairs = []
-        for ip, mp in self.pairs:
-            try:
-                with Image.open(ip) as a:
-                    a.verify()
-                with Image.open(mp) as b:
-                    b.verify()
-                valid_pairs.append((ip, mp))
-            except Exception as e:
-                self.bad.append((ip, mp, repr(e)))
-
-        self.pairs = valid_pairs
-        if self.bad:
-            os.makedirs("outputs", exist_ok=True)
-            with open("outputs/bad_files.txt", "w", encoding="utf-8") as f:
-                for ip, mp, e in self.bad:
-                    f.write(f"{ip} | {mp} | {e}\n")
-            print(f"[OasisMRIDataset] Skipped {len(self.bad)} broken pairs. See outputs/bad_files.txt")
-
-        # Print dataset summary
-        if self.pairs:
-            print(f"[OasisMRIDataset] Found {len(self.pairs)} valid pairs. Example:\n"
-                  f"  image: {self.pairs[0][0]}\n  mask : {self.pairs[0][1]}")
+        print(f"[OasisMRIDataset] Found {len(self.pairs)} pairs. Example:\n"
+              f"  image: {self.pairs[0][0]}\n  mask : {self.pairs[0][1]}")
 
     def __len__(self):
         return len(self.pairs)
@@ -115,7 +92,7 @@ class OasisMRIDataset(Dataset):
             mask = Image.open(msk_path).convert("L")
 
         # Convert to numpy arrays
-        image = np.asarray(image, dtype=np.float32) / 255.0  # [0,1]
+        image = np.asarray(image, dtype=np.float32) / 255.0
         mask = np.asarray(mask, dtype=np.uint8)
 
         # Ensure mask is binary {0,1}
@@ -123,8 +100,8 @@ class OasisMRIDataset(Dataset):
             mask = (mask > 0).astype(np.uint8)
 
         # Convert to tensors
-        image_t = torch.from_numpy(image).unsqueeze(0)  # [1,H,W] float32
-        mask_t = torch.from_numpy(mask.astype(np.int64))  # [H,W] int64
+        image_t = torch.from_numpy(image).unsqueeze(0)  # [1,H,W]
+        mask_t = torch.from_numpy(mask.astype(np.int64))  # [H,W]
 
         if self.transform is not None:
             image_t, mask_t = self.transform(image_t, mask_t)

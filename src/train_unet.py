@@ -8,7 +8,7 @@ from torch.cuda.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 
-from dataset_PNG import OasisMRIDataset
+from dataset_png import OasisMRIDataset   # ✅ fixed import (lowercase)
 
 # ---------------------- Simple 2D UNet ----------------------
 class DoubleConv(nn.Module):
@@ -66,7 +66,6 @@ class DiceLoss(nn.Module):
         self.smooth = smooth
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        # logits: [B,1,H,W], targets: [B,1,H,W] (float 0/1)
         probs = torch.sigmoid(logits)
         dims = (0, 2, 3)
         intersection = torch.sum(probs * targets, dims)
@@ -85,11 +84,7 @@ def dice_score(logits: torch.Tensor, targets: torch.Tensor, thr: float = 0.5) ->
     return dice.mean().item()
 
 # ---------------------- Data ----------------------
-def get_loaders(
-    root: str,
-    batch_size: int,
-    num_workers: int,
-) -> Tuple[DataLoader, DataLoader]:
+def get_loaders(root: str, batch_size: int, num_workers: int) -> Tuple[DataLoader, DataLoader]:
     """Create train/val loaders using your PNG folder layout under data/OASIS/"""
     train_img = os.path.join(root, "keras_png_slices_train")
     train_msk = os.path.join(root, "keras_png_slices_seg_train")
@@ -105,12 +100,12 @@ def get_loaders(
                               num_workers=num_workers, pin_memory=True)
     return train_loader, val_loader
 
-# ---------------------- Train ----------------------
+# ---------------------- Visualization ----------------------
 def save_vis(img, gt, pred, path: str):
     """Save side-by-side visualization for quick sanity check."""
-    img = img.squeeze(0).cpu().numpy()        # [H,W]
-    gt  = gt.squeeze(0).cpu().numpy()         # [H,W]
-    pr  = pred.squeeze(0).cpu().numpy()       # [H,W]
+    img = img.squeeze(0).cpu().numpy()
+    gt  = gt.squeeze(0).cpu().numpy()
+    pr  = pred.squeeze(0).cpu().numpy()
     plt.figure(figsize=(9, 3))
     plt.subplot(1, 3, 1); plt.imshow(img, cmap="gray"); plt.title("image"); plt.axis("off")
     plt.subplot(1, 3, 2); plt.imshow(gt, cmap="gray");  plt.title("mask");  plt.axis("off")
@@ -118,10 +113,10 @@ def save_vis(img, gt, pred, path: str):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     plt.tight_layout(); plt.savefig(path, dpi=150); plt.close()
 
+# ---------------------- Main ----------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data-root", type=str, default="data/OASIS",
-                    help="Folder containing keras_png_slices_* subfolders")
+    ap.add_argument("--data-root", type=str, default="data/OASIS")
     ap.add_argument("--epochs", type=int, default=10)
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--lr", type=float, default=1e-3)
@@ -146,7 +141,7 @@ def main():
     bce  = nn.BCEWithLogitsLoss()
     dice = DiceLoss()
     opt  = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    scaler = GradScaler(enabled=args.amp)
+    scaler = GradScaler(device="cuda", enabled=args.amp)  # ✅ updated
 
     best_dice = 0.0
     for epoch in range(1, args.epochs + 1):
@@ -155,12 +150,12 @@ def main():
         running = []
         for img, msk in train_loader:
             img = img.to(device, non_blocking=True)
-            msk = msk.to(device, non_blocking=True).float().unsqueeze(1)  # [B,1,H,W]
+            msk = msk.to(device, non_blocking=True).float().unsqueeze(1)
             if device.type == "cuda":
                 img = img.to(memory_format=torch.channels_last)
 
             opt.zero_grad(set_to_none=True)
-            with autocast(enabled=args.amp):
+            with autocast(device_type="cuda", enabled=args.amp):
                 logits = model(img)
                 loss = 0.5 * bce(logits, msk) + 0.5 * dice(logits, msk)
             scaler.scale(loss).backward()
@@ -169,6 +164,7 @@ def main():
             running.append(loss.item())
 
         train_loss = float(np.mean(running))
+
         # -------- validate --------
         model.eval()
         dices = []
@@ -176,7 +172,7 @@ def main():
             for img, msk in val_loader:
                 img = img.to(device, non_blocking=True)
                 msk = msk.to(device, non_blocking=True).float().unsqueeze(1)
-                with autocast(enabled=args.amp):
+                with autocast(device_type="cuda", enabled=args.amp):
                     logits = model(img)
                 dices.append(dice_score(logits, msk))
             mean_dice = float(np.mean(dices))
@@ -189,13 +185,15 @@ def main():
             ckpt_path = os.path.join(args.outdir, "checkpoints", "best_unet2d.pth")
             torch.save(model.state_dict(), ckpt_path)
 
-            # also dump one visualization
-            img0 = img[0].detach().cpu()
-            msk0 = msk[0].detach().cpu()
-            pr0  = (torch.sigmoid(logits[0]) > 0.5).float().detach().cpu()
-            vis_path = os.path.join(args.outdir, "visualizations", f"val_epoch{epoch}_dice{best_dice:.3f}.png")
-            save_vis(img0, msk0, pr0, vis_path)
-            print(f"  -> saved best to {ckpt_path} and {vis_path}")
+            # save multiple samples
+            for i in range(min(3, img.shape[0])):  # save first 3 samples
+                img0 = img[i].detach().cpu()
+                msk0 = msk[i].detach().cpu()
+                pr0  = (torch.sigmoid(logits[i]) > 0.5).float().detach().cpu()
+                vis_path = os.path.join(args.outdir, "visualizations",
+                                        f"val_epoch{epoch}_sample{i}_dice{best_dice:.3f}.png")
+                save_vis(img0, msk0, pr0, vis_path)
+            print(f"  -> saved best to {ckpt_path}")
 
     print(f"Training done. Best Val Dice = {best_dice:.4f}")
 
