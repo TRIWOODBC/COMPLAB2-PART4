@@ -45,20 +45,22 @@ def GN(c, g=8):
     return nn.GroupNorm(num_groups=min(g, c), num_channels=c)
 
 # -----------------------------
-# VAE Model
+# VAE Model (6 layers)
 # -----------------------------
 class Encoder(nn.Module):
-    def __init__(self, latent_dim=32, img_size=256, base=32):
+    def __init__(self, latent_dim=64, img_size=256, base=32):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(1, base, 4, 2, 1), nn.ReLU(True),
-            nn.Conv2d(base, base*2, 4, 2, 1), GN(base*2), nn.ReLU(True),
-            nn.Conv2d(base*2, base*4, 4, 2, 1), GN(base*4), nn.ReLU(True),
-            nn.Conv2d(base*4, base*8, 4, 2, 1), GN(base*8), nn.ReLU(True),
+            nn.Conv2d(1, base, 4, 2, 1), nn.ReLU(True),                # 256->128
+            nn.Conv2d(base, base*2, 4, 2, 1), GN(base*2), nn.ReLU(True),   # 128->64
+            nn.Conv2d(base*2, base*4, 4, 2, 1), GN(base*4), nn.ReLU(True), # 64->32
+            nn.Conv2d(base*4, base*8, 4, 2, 1), GN(base*8), nn.ReLU(True), # 32->16
+            nn.Conv2d(base*8, base*16, 4, 2, 1), GN(base*16), nn.ReLU(True),#16->8
+            nn.Conv2d(base*16, base*32, 4, 2, 1), GN(base*32), nn.ReLU(True),#8->4
         )
-        feat = img_size // 16
-        self.fc_mu = nn.Linear(base*8*feat*feat, latent_dim)
-        self.fc_logvar = nn.Linear(base*8*feat*feat, latent_dim)
+        feat = img_size // (2**6)  # 256/64=4
+        self.fc_mu = nn.Linear(base*32*feat*feat, latent_dim)
+        self.fc_logvar = nn.Linear(base*32*feat*feat, latent_dim)
 
     def forward(self, x):
         h = self.net(x)
@@ -66,22 +68,23 @@ class Encoder(nn.Module):
         return self.fc_mu(h), self.fc_logvar(h)
 
 class Decoder(nn.Module):
-    def __init__(self, latent_dim=32, img_size=256, base=32):
+    def __init__(self, latent_dim=64, img_size=256, base=32):
         super().__init__()
-        feat = img_size // 16
-        self.fc = nn.Linear(latent_dim, base*8*feat*feat)
-        self.unflatten = nn.Unflatten(1, (base*8, feat, feat))
+        self.fc = nn.Linear(latent_dim, base*32*4*4)
+        self.unflatten = nn.Unflatten(1, (base*32, 4, 4))
         self.net = nn.Sequential(
-            nn.ConvTranspose2d(base*8, base*4, 4, 2, 1), GN(base*4), nn.ReLU(True),
-            nn.ConvTranspose2d(base*4, base*2, 4, 2, 1), GN(base*2), nn.ReLU(True),
-            nn.ConvTranspose2d(base*2, base, 4, 2, 1),   GN(base),   nn.ReLU(True),
-            nn.ConvTranspose2d(base, 1, 4, 2, 1), nn.Sigmoid(),
+            nn.ConvTranspose2d(base*32, base*16, 4, 2, 1), GN(base*16), nn.ReLU(True), #4->8
+            nn.ConvTranspose2d(base*16, base*8, 4, 2, 1), GN(base*8), nn.ReLU(True),   #8->16
+            nn.ConvTranspose2d(base*8, base*4, 4, 2, 1), GN(base*4), nn.ReLU(True),    #16->32
+            nn.ConvTranspose2d(base*4, base*2, 4, 2, 1), GN(base*2), nn.ReLU(True),    #32->64
+            nn.ConvTranspose2d(base*2, base, 4, 2, 1),   GN(base),   nn.ReLU(True),    #64->128
+            nn.ConvTranspose2d(base, 1, 4, 2, 1), nn.Sigmoid(),                         #128->256
         )
 
     def forward(self, z): return self.net(self.unflatten(self.fc(z)))
 
 class VAE(nn.Module):
-    def __init__(self, latent_dim=32, img_size=256):
+    def __init__(self, latent_dim=64, img_size=256):
         super().__init__()
         self.enc = Encoder(latent_dim, img_size)
         self.dec = Decoder(latent_dim, img_size)
@@ -128,7 +131,7 @@ def plot_curves(history, path):
 # Train
 # -----------------------------
 def train(data_root="data/OASIS", out_dir="outputs/vae", img_size=256,
-          batch_size=16, epochs=50, lr=1e-4, latent_dim=32, seed=42,
+          batch_size=8, epochs=80, lr=1e-4, latent_dim=64, seed=42,
           save_every=10, recon="mse", kl_warmup_epochs=15, max_grad_norm=1.0):
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -188,10 +191,10 @@ if __name__ == "__main__":
     parser.add_argument("--data_root", type=str, default="data/OASIS")
     parser.add_argument("--out_dir", type=str, default="outputs/vae")
     parser.add_argument("--img_size", type=int, default=256)
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--latent_dim", type=int, default=32)
+    parser.add_argument("--latent_dim", type=int, default=64)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save_every", type=int, default=10)
     parser.add_argument("--recon", type=str, default="mse", choices=["mse","bce"])
