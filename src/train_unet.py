@@ -8,7 +8,7 @@ from torch.cuda.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 
-from dataset_png import OasisMRIDataset
+from dataset_PNG import OasisMRIDataset
 
 # ---------------------- Simple 2D UNet ----------------------
 class DoubleConv(nn.Module):
