@@ -11,6 +11,7 @@ from torchvision import transforms, utils
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import random
+import argparse
 
 # -----------------------------
 # Dataset (OASIS PNG only)
@@ -21,7 +22,7 @@ SPLIT2DIR = {
 }
 
 class OASISPNGSlices(Dataset):
-    def __init__(self, data_root: str, split: str = "train", img_size: int = 128):
+    def __init__(self, data_root: str, split: str = "train", img_size: int = 256):
         self.root = Path(data_root) / SPLIT2DIR[split]
         self.files = sorted([p for p in self.root.glob("*.png")])
         if not self.files:
@@ -41,7 +42,7 @@ class OASISPNGSlices(Dataset):
 # VAE Model
 # -----------------------------
 class Encoder(nn.Module):
-    def __init__(self, latent_dim=16, img_size=128, base=32):
+    def __init__(self, latent_dim=16, img_size=256, base=32):
         super().__init__()
         self.net = nn.Sequential(
             nn.Conv2d(1, base, 4, 2, 1), nn.ReLU(True),
@@ -59,7 +60,7 @@ class Encoder(nn.Module):
         return self.fc_mu(h), self.fc_logvar(h)
 
 class Decoder(nn.Module):
-    def __init__(self, latent_dim=16, img_size=128, base=32):
+    def __init__(self, latent_dim=16, img_size=256, base=32):
         super().__init__()
         feat = img_size // 16
         self.fc = nn.Linear(latent_dim, base*8*feat*feat)
@@ -74,7 +75,7 @@ class Decoder(nn.Module):
     def forward(self, z): return self.net(self.unflatten(self.fc(z)))
 
 class VAE(nn.Module):
-    def __init__(self, latent_dim=16, img_size=128):
+    def __init__(self, latent_dim=16, img_size=256):
         super().__init__()
         self.enc = Encoder(latent_dim, img_size)
         self.dec = Decoder(latent_dim, img_size)
@@ -115,8 +116,8 @@ def plot_curves(history, path):
 # -----------------------------
 # Train
 # -----------------------------
-def train(data_root="data/OASIS", out_dir="outputs/vae", img_size=128,
-          batch_size=64, epochs=50, lr=2e-4, latent_dim=16, seed=42):
+def train(data_root="data/OASIS", out_dir="outputs/vae", img_size=256,
+          batch_size=16, epochs=50, lr=2e-4, latent_dim=16, seed=42, save_every=10):
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -148,11 +149,13 @@ def train(data_root="data/OASIS", out_dir="outputs/vae", img_size=128,
                 va_loss.append(l.item())
         val_mean = np.mean(va_loss); history["val"].append(val_mean)
 
-        with torch.no_grad():
-            x = next(iter(dl_va))[:32].to(device)
-            x_rec,_,_ = model(x)
-            save_grid(x.cpu(), out/"figs"/f"ep{ep:03d}_inputs.png")
-            save_grid(x_rec.cpu(), out/"figs"/f"ep{ep:03d}_recon.png")
+        # 每 save_every 轮保存一次图片
+        if ep % save_every == 0 or ep == 1:
+            with torch.no_grad():
+                x = next(iter(dl_va))[:32].to(device)
+                x_rec,_,_ = model(x)
+                save_grid(x.cpu(), out/"figs"/f"ep{ep:03d}_inputs.png")
+                save_grid(x_rec.cpu(), out/"figs"/f"ep{ep:03d}_recon.png")
 
         ckpt={"model":model.state_dict(),"epoch":ep,"val_loss":val_mean}
         torch.save(ckpt, out/"checkpoints"/"last.pt")
@@ -165,4 +168,16 @@ def train(data_root="data/OASIS", out_dir="outputs/vae", img_size=128,
     print("Training finished. Best val loss:", best_val)
 
 if __name__ == "__main__":
-    train()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_root", type=str, default="data/OASIS")
+    parser.add_argument("--out_dir", type=str, default="outputs/vae")
+    parser.add_argument("--img_size", type=int, default=256)
+    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--latent_dim", type=int, default=16)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--save_every", type=int, default=10)
+    args = parser.parse_args()
+
+    train(**vars(args))
