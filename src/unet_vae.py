@@ -12,9 +12,10 @@ from torchvision.utils import save_image, make_grid
 
 
 # ------------------------------
-# Dataset
+# Dataset class
 # ------------------------------
 class OasisSlices(Dataset):
+    """OASIS MRI dataset loader with paired image and segmentation mask."""
     def __init__(self, root, split="train", image_size=128):
         super().__init__()
         self.image_size = image_size
@@ -28,6 +29,7 @@ class OasisSlices(Dataset):
         return len(self.images)
 
     def _resize(self, arr, size, nearest=False):
+        """Resize image or mask to target size."""
         mode = Image.NEAREST if nearest else Image.BILINEAR
         arr = arr.astype(np.uint8) if arr.dtype != np.uint8 else arr
         return np.array(Image.fromarray(arr).resize((size, size), mode))
@@ -46,9 +48,10 @@ class OasisSlices(Dataset):
 
 
 # ------------------------------
-# UNet Model
+# UNet model
 # ------------------------------
 class DoubleConv(nn.Module):
+    """(Conv -> BN -> ReLU) * 2"""
     def __init__(self, in_ch, out_ch):
         super().__init__()
         self.conv = nn.Sequential(
@@ -65,6 +68,7 @@ class DoubleConv(nn.Module):
 
 
 class UNet(nn.Module):
+    """Standard UNet for binary segmentation."""
     def __init__(self, in_ch=1, out_ch=2):
         super().__init__()
         self.d1 = DoubleConv(in_ch, 64)
@@ -108,9 +112,10 @@ class UNet(nn.Module):
 
 
 # ------------------------------
-# VAE Model
+# Variational Autoencoder (VAE)
 # ------------------------------
 class VAE(nn.Module):
+    """Convolutional VAE for MRI reconstruction."""
     def __init__(self, in_ch=1, latent_dim=128, image_size=128):
         super().__init__()
         self.enc = nn.Sequential(
@@ -159,6 +164,7 @@ class VAE(nn.Module):
 # Loss functions
 # ------------------------------
 def dice_loss(pred, target):
+    """Softmax + Dice loss for binary segmentation."""
     pred = F.softmax(pred, dim=1)[:, 1]
     target = (target == 1).float()
     inter = (pred * target).sum()
@@ -166,13 +172,14 @@ def dice_loss(pred, target):
 
 
 def vae_loss_fn(recon, x, mu, logvar):
+    """VAE loss = reconstruction (MSE) + KL divergence."""
     recon_loss = F.mse_loss(recon, x, reduction="sum") / x.size(0)
     kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / x.size(0)
     return recon_loss + kl
 
 
 # ------------------------------
-# Training
+# Config
 # ------------------------------
 @dataclass
 class CFG:
@@ -185,28 +192,50 @@ class CFG:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 
+# ------------------------------
+# Training
+# ------------------------------
 def train(cfg):
+    # Load datasets
     ds_tr = OasisSlices(cfg.data_root, "train", cfg.image_size)
-    dl_tr = DataLoader(ds_tr, batch_size=cfg.batch_size, shuffle=True, num_workers=2)
+    ds_va = OasisSlices(cfg.data_root, "validate", cfg.image_size)
+    ds_te = OasisSlices(cfg.data_root, "test", cfg.image_size)
 
+    dl_tr = DataLoader(ds_tr, batch_size=cfg.batch_size, shuffle=True, num_workers=2)
+    dl_va = DataLoader(ds_va, batch_size=cfg.batch_size, shuffle=False, num_workers=2)
+    dl_te = DataLoader(ds_te, batch_size=cfg.batch_size, shuffle=False, num_workers=2)
+
+    # Models
     unet = UNet().to(cfg.device)
     vae = VAE(image_size=cfg.image_size).to(cfg.device)
 
     opt = torch.optim.Adam(list(unet.parameters()) + list(vae.parameters()), lr=cfg.lr)
 
-    os.makedirs(cfg.outputs, exist_ok=True)
+    # Output directories
+    img_dir = os.path.join(cfg.outputs, "images")
+    model_dir = os.path.join(cfg.outputs, "models")
+    os.makedirs(img_dir, exist_ok=True)
+    os.makedirs(model_dir, exist_ok=True)
+
+    # Log file
+    log_file = os.path.join(cfg.outputs, "train.log")
+    with open(log_file, "w") as f:
+        f.write("Epoch,TrainLoss,ValLoss,ValDice,Best\n")
+
+    best_dice = 0.0
 
     for ep in range(1, cfg.epochs + 1):
+        # --- Train ---
         unet.train(); vae.train()
         total_loss = 0
         for img, mask in dl_tr:
             img, mask = img.to(cfg.device), mask.to(cfg.device)
 
-            # UNet forward
+            # UNet
             logits = unet(img)
             seg_loss = dice_loss(logits, mask)
 
-            # VAE forward
+            # VAE
             recon, mu, logvar = vae(img)
             vae_loss = vae_loss_fn(recon, img, mu, logvar)
 
@@ -218,21 +247,69 @@ def train(cfg):
 
             total_loss += loss.item()
 
-        print(f"[Epoch {ep}] Loss: {total_loss/len(dl_tr):.4f}")
+        train_loss = total_loss / len(dl_tr)
 
-        # save visuals
+        # --- Validation ---
+        unet.eval(); vae.eval()
+        val_losses, dice_scores = [], []
+        with torch.no_grad():
+            for img, mask in dl_va:
+                img, mask = img.to(cfg.device), mask.to(cfg.device)
+                logits = unet(img)
+                seg_loss = dice_loss(logits, mask)
+                recon, mu, logvar = vae(img)
+                vloss = seg_loss + 0.5 * vae_loss_fn(recon, img, mu, logvar)
+                val_losses.append(vloss.item())
+                dice_scores.append(1 - seg_loss.item())
+
+        val_loss = np.mean(val_losses)
+        mean_dice = np.mean(dice_scores)
+
+        print(f"[Epoch {ep}] TrainLoss={train_loss:.4f} | ValLoss={val_loss:.4f} | ValDice={mean_dice:.4f}")
+
+        # Save log line
+        with open(log_file, "a") as f:
+            f.write(f"{ep},{train_loss:.4f},{val_loss:.4f},{mean_dice:.4f},{mean_dice>best_dice}\n")
+
+        # Save best model
+        if mean_dice > best_dice:
+            best_dice = mean_dice
+            torch.save({"unet": unet.state_dict(), "vae": vae.state_dict()},
+                       os.path.join(model_dir, "best_unet_vae.pt"))
+            print(f"  >> Saved new best model (Dice={best_dice:.4f})")
+
+        # Save visuals
         if ep % 5 == 0 or ep == 1:
             grid = make_grid(torch.cat([img[:4], recon[:4]], dim=0), nrow=4, normalize=True)
-            save_image(grid, os.path.join(cfg.outputs, f"vae_recon_ep{ep:03d}.png"))
+            save_image(grid, os.path.join(img_dir, f"vae_recon_ep{ep:03d}.png"))
+
             pred = torch.argmax(logits, dim=1, keepdim=True).float()
             grid2 = make_grid(torch.cat([img[:4], mask[:4].unsqueeze(1).float(), pred[:4]], dim=0),
                               nrow=4, normalize=True)
-            save_image(grid2, os.path.join(cfg.outputs, f"unet_seg_ep{ep:03d}.png"))
+            save_image(grid2, os.path.join(img_dir, f"unet_seg_ep{ep:03d}.png"))
 
-    torch.save({"unet": unet.state_dict(), "vae": vae.state_dict()},
-               os.path.join(cfg.outputs, "unet_vae.pt"))
+    # --- Test ---
+    print("Running inference on test set...")
+    unet.eval(); vae.eval()
+    with torch.no_grad():
+        for img, mask in dl_te:
+            img, mask = img.to(cfg.device), mask.to(cfg.device)
+            logits = unet(img)
+            recon, _, _ = vae(img)
+
+            pred = torch.argmax(logits, dim=1, keepdim=True).float()
+            grid = make_grid(torch.cat([img[:4], mask[:4].unsqueeze(1).float(), pred[:4]], dim=0),
+                             nrow=4, normalize=True)
+            save_image(grid, os.path.join(img_dir, "test_seg.png"))
+
+            grid2 = make_grid(torch.cat([img[:4], recon[:4]], dim=0), nrow=4, normalize=True)
+            save_image(grid2, os.path.join(img_dir, "test_recon.png"))
+            break  # save one batch
 
 
+# ------------------------------
+# Entry
+# ------------------------------
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=10)
