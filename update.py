@@ -17,7 +17,7 @@ def main():
 
     # 2) Generate commit message with timestamp
     msg = f"update: sync latest changes ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})"
-    run_cmd(f'git commit -m "feat(umap): add case_xxx parsing, csv labels, PCA/std options for clearer plots"')
+    run_cmd(f'git commit -m "deploy: add initial UNet implementation"')
 
     # 3) Push to remote
     run_cmd("git push origin main")

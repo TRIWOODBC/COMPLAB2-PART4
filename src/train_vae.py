@@ -19,6 +19,7 @@ import argparse
 SPLIT2DIR = {
     "train": "keras_png_slices_train",
     "validate": "keras_png_slices_validate",
+    "test": "keras_png_slices_test",
 }
 
 class MRIIntensityNorm(object):

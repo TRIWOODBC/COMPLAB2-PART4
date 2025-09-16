@@ -123,7 +123,7 @@ def main():
     parser.add_argument("--ckpt", type=str, default="outputs/vae/checkpoints/best.pt",
                         help="Path to checkpoint (best.pt or last.pt)")
     parser.add_argument("--data_root", type=str, default="data/OASIS")
-    parser.add_argument("--split", type=str, default="validate", choices=["validate", "test", "train"])
+    parser.add_argument("--split", type=str, default="test", choices=["validate", "test", "train"])
     parser.add_argument("--img_size", type=int, default=256, help="Must match training size")
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--latent_dim", type=int, default=None, help="Override; otherwise infer from ckpt")
