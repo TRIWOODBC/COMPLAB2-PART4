@@ -17,7 +17,7 @@ def main():
 
     # 2) Generate commit message with timestamp
     msg = f"update: sync latest changes ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})"
-    run_cmd(f'git commit -m "deploy: add initial UNet implementation"')
+    run_cmd(f'git commit -m "feat: replace UNet with combined UNet+VAE model"')
 
     # 3) Push to remote
     run_cmd("git push origin main")

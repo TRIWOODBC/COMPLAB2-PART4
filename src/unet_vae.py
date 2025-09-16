@@ -1,0 +1,248 @@
+import os
+import argparse
+import numpy as np
+from PIL import Image
+from dataclasses import dataclass
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from torchvision.utils import save_image, make_grid
+
+
+# ------------------------------
+# Dataset
+# ------------------------------
+class OasisSlices(Dataset):
+    def __init__(self, root, split="train", image_size=128):
+        super().__init__()
+        self.image_size = image_size
+        img_dir = os.path.join(root, f"keras_png_slices_{split}")
+        mask_dir = os.path.join(root, f"keras_png_slices_seg_{split}")
+
+        self.images = sorted([os.path.join(img_dir, f) for f in os.listdir(img_dir)])
+        self.masks = sorted([os.path.join(mask_dir, f) for f in os.listdir(mask_dir)])
+
+    def __len__(self):
+        return len(self.images)
+
+    def _resize(self, arr, size, nearest=False):
+        mode = Image.NEAREST if nearest else Image.BILINEAR
+        arr = arr.astype(np.uint8) if arr.dtype != np.uint8 else arr
+        return np.array(Image.fromarray(arr).resize((size, size), mode))
+
+    def __getitem__(self, idx):
+        img = np.array(Image.open(self.images[idx]).convert("L"))
+        mask = np.array(Image.open(self.masks[idx]).convert("L"))
+
+        img = self._resize(img, self.image_size) / 255.0
+        mask = self._resize(mask, self.image_size, nearest=True)
+        mask = (mask > 0).astype(np.int64)
+
+        img = torch.from_numpy(img).unsqueeze(0).float()
+        mask = torch.from_numpy(mask).long()
+        return img, mask
+
+
+# ------------------------------
+# UNet Model
+# ------------------------------
+class DoubleConv(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, padding=1),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_ch, out_ch, 3, padding=1),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class UNet(nn.Module):
+    def __init__(self, in_ch=1, out_ch=2):
+        super().__init__()
+        self.d1 = DoubleConv(in_ch, 64)
+        self.d2 = DoubleConv(64, 128)
+        self.d3 = DoubleConv(128, 256)
+        self.d4 = DoubleConv(256, 512)
+
+        self.bridge = DoubleConv(512, 1024)
+
+        self.u1 = nn.ConvTranspose2d(1024, 512, 2, stride=2)
+        self.u1_conv = DoubleConv(1024, 512)
+        self.u2 = nn.ConvTranspose2d(512, 256, 2, stride=2)
+        self.u2_conv = DoubleConv(512, 256)
+        self.u3 = nn.ConvTranspose2d(256, 128, 2, stride=2)
+        self.u3_conv = DoubleConv(256, 128)
+        self.u4 = nn.ConvTranspose2d(128, 64, 2, stride=2)
+        self.u4_conv = DoubleConv(128, 64)
+
+        self.out_conv = nn.Conv2d(64, out_ch, 1)
+
+        self.pool = nn.MaxPool2d(2)
+
+    def forward(self, x):
+        d1 = self.d1(x)
+        d2 = self.d2(self.pool(d1))
+        d3 = self.d3(self.pool(d2))
+        d4 = self.d4(self.pool(d3))
+
+        bridge = self.bridge(self.pool(d4))
+
+        u1 = self.u1(bridge)
+        u1 = self.u1_conv(torch.cat([u1, d4], dim=1))
+        u2 = self.u2(u1)
+        u2 = self.u2_conv(torch.cat([u2, d3], dim=1))
+        u3 = self.u3(u2)
+        u3 = self.u3_conv(torch.cat([u3, d2], dim=1))
+        u4 = self.u4(u3)
+        u4 = self.u4_conv(torch.cat([u4, d1], dim=1))
+
+        return self.out_conv(u4)
+
+
+# ------------------------------
+# VAE Model
+# ------------------------------
+class VAE(nn.Module):
+    def __init__(self, in_ch=1, latent_dim=128, image_size=128):
+        super().__init__()
+        self.enc = nn.Sequential(
+            nn.Conv2d(in_ch, 32, 4, 2, 1), nn.ReLU(),
+            nn.Conv2d(32, 64, 4, 2, 1), nn.ReLU(),
+            nn.Conv2d(64, 128, 4, 2, 1), nn.ReLU(),
+            nn.Conv2d(128, 256, 4, 2, 1), nn.ReLU()
+        )
+        feat_size = image_size // 16
+        self.fc_mu = nn.Linear(256 * feat_size * feat_size, latent_dim)
+        self.fc_logvar = nn.Linear(256 * feat_size * feat_size, latent_dim)
+
+        self.fc_dec = nn.Linear(latent_dim, 256 * feat_size * feat_size)
+        self.dec = nn.Sequential(
+            nn.ConvTranspose2d(256, 128, 4, 2, 1), nn.ReLU(),
+            nn.ConvTranspose2d(128, 64, 4, 2, 1), nn.ReLU(),
+            nn.ConvTranspose2d(64, 32, 4, 2, 1), nn.ReLU(),
+            nn.ConvTranspose2d(32, in_ch, 4, 2, 1), nn.Sigmoid()
+        )
+
+        self.feat_size = feat_size
+
+    def encode(self, x):
+        h = self.enc(x)
+        h = h.view(h.size(0), -1)
+        mu, logvar = self.fc_mu(h), self.fc_logvar(h)
+        return mu, logvar
+
+    def reparam(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+    def decode(self, z):
+        h = self.fc_dec(z).view(-1, 256, self.feat_size, self.feat_size)
+        return self.dec(h)
+
+    def forward(self, x):
+        mu, logvar = self.encode(x)
+        z = self.reparam(mu, logvar)
+        recon = self.decode(z)
+        return recon, mu, logvar
+
+
+# ------------------------------
+# Loss functions
+# ------------------------------
+def dice_loss(pred, target):
+    pred = F.softmax(pred, dim=1)[:, 1]
+    target = (target == 1).float()
+    inter = (pred * target).sum()
+    return 1 - (2. * inter + 1e-8) / (pred.sum() + target.sum() + 1e-8)
+
+
+def vae_loss_fn(recon, x, mu, logvar):
+    recon_loss = F.mse_loss(recon, x, reduction="sum") / x.size(0)
+    kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / x.size(0)
+    return recon_loss + kl
+
+
+# ------------------------------
+# Training
+# ------------------------------
+@dataclass
+class CFG:
+    data_root: str = "data/OASIS"
+    outputs: str = "outputs"
+    image_size: int = 128
+    batch_size: int = 8
+    epochs: int = 10
+    lr: float = 1e-4
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def train(cfg):
+    ds_tr = OasisSlices(cfg.data_root, "train", cfg.image_size)
+    dl_tr = DataLoader(ds_tr, batch_size=cfg.batch_size, shuffle=True, num_workers=2)
+
+    unet = UNet().to(cfg.device)
+    vae = VAE(image_size=cfg.image_size).to(cfg.device)
+
+    opt = torch.optim.Adam(list(unet.parameters()) + list(vae.parameters()), lr=cfg.lr)
+
+    os.makedirs(cfg.outputs, exist_ok=True)
+
+    for ep in range(1, cfg.epochs + 1):
+        unet.train(); vae.train()
+        total_loss = 0
+        for img, mask in dl_tr:
+            img, mask = img.to(cfg.device), mask.to(cfg.device)
+
+            # UNet forward
+            logits = unet(img)
+            seg_loss = dice_loss(logits, mask)
+
+            # VAE forward
+            recon, mu, logvar = vae(img)
+            vae_loss = vae_loss_fn(recon, img, mu, logvar)
+
+            loss = seg_loss + 0.5 * vae_loss
+
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+
+            total_loss += loss.item()
+
+        print(f"[Epoch {ep}] Loss: {total_loss/len(dl_tr):.4f}")
+
+        # save visuals
+        if ep % 5 == 0 or ep == 1:
+            grid = make_grid(torch.cat([img[:4], recon[:4]], dim=0), nrow=4, normalize=True)
+            save_image(grid, os.path.join(cfg.outputs, f"vae_recon_ep{ep:03d}.png"))
+            pred = torch.argmax(logits, dim=1, keepdim=True).float()
+            grid2 = make_grid(torch.cat([img[:4], mask[:4].unsqueeze(1).float(), pred[:4]], dim=0),
+                              nrow=4, normalize=True)
+            save_image(grid2, os.path.join(cfg.outputs, f"unet_seg_ep{ep:03d}.png"))
+
+    torch.save({"unet": unet.state_dict(), "vae": vae.state_dict()},
+               os.path.join(cfg.outputs, "unet_vae.pt"))
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--image_size", type=int, default=128)
+    args = parser.parse_args()
+
+    cfg = CFG(epochs=args.epochs, batch_size=args.batch_size, image_size=args.image_size)
+    train(cfg)
+
+
+if __name__ == "__main__":
+    main()
